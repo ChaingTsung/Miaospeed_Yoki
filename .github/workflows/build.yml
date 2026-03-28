@@ -1,0 +1,99 @@
+name: Build and Release Miaospeed
+
+on:
+  # 允许在 Actions 页面手动触发工作流
+  workflow_dispatch: 
+
+permissions:
+  # 赋予 GitHub Actions 读写仓库代码和创建 Release 的权限
+  contents: write 
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '^1.21'
+
+      - name: Clone Miaospeed Repository
+        run: git clone https://github.com/AirportR/miaospeed.git
+
+      - name: Generate TOKEN and Embedded Files
+        run: |
+          cd miaospeed
+          
+          # 1. 自动生成 8 段式 TOKEN (16位|16位|...|16位)
+          FULL_TOKEN=""
+          for i in {1..8}; do
+              PART=$(uuidgen | tr -d '-' | cut -c 1-16)
+              if [ -z "$FULL_TOKEN" ]; then
+                  FULL_TOKEN="$PART"
+              else
+                  FULL_TOKEN="${FULL_TOKEN}|${PART}"
+              fi
+          done
+          
+          mkdir -p utils/embeded/
+          echo "$FULL_TOKEN" > utils/embeded/BUILDTOKEN.key
+          
+          # 将 TOKEN 写入环境变量，供后续生成 README 时使用
+          echo "BUILD_TOKEN=$FULL_TOKEN" >> $GITHUB_ENV
+
+          # 2. 生成自签名证书 (有效期10年)
+          mkdir -p preconfigs/embeded/miaokoCA/
+          openssl genrsa -out preconfigs/embeded/miaokoCA/miaoko.key 2048
+          openssl req -new -x509 -days 3650 -key preconfigs/embeded/miaokoCA/miaoko.key -out preconfigs/embeded/miaokoCA/miaoko.crt -subj "/C=CN/ST=State/L=City/O=Miaoko/OU=Dev/CN=miaospeed"
+
+          # 3. 复制 Ubuntu 系统自带的根证书集
+          cp /etc/ssl/certs/ca-certificates.crt preconfigs/embeded/
+
+      - name: Build Miaospeed
+        run: |
+          cd miaospeed
+          go mod download
+          # 禁用 CGO 并指定 Linux amd64 架构，确保编译出的文件可以在任意 VPS 独立运行
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o miaospeed_linux_amd64 .
+
+      - name: Generate and Commit README.md
+        run: |
+          # 覆盖或生成仓库主目录的 README.md
+          cat <<EOF > README.md
+          # Miaospeed 自动化编译发行版
+
+          这是由 GitHub Actions 自动化构建的 \`miaospeed\` 服务端程序。已内置所需的 mTLS 证书与验证配置。
+
+          ## 编译信息
+          - **构建时间**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          - **系统架构**: Linux / amd64
+          - **BUILD TOKEN**: 
+          \`\`\`text
+          $BUILD_TOKEN
+          \`\`\`
+          
+          *请在测速客户端或面板中妥善配置此 TOKEN 以完成签名验证。*
+          EOF
+          
+          # 提交并推送到当前仓库
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add README.md
+          # 使用 [skip ci] 防止触发其他可能存在的自动化任务导致死循环
+          git commit -m "docs: Auto-update README with new BUILDTOKEN [skip ci]" || echo "No changes to commit"
+          git push
+
+      - name: Create Release and Upload Asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 使用当前时间生成唯一的 Tag
+          TAG_NAME="v$(date +'%Y%m%d%H%M%S')"
+          
+          # 使用 GitHub CLI 创建 Release 并上传编译好的二进制文件
+          gh release create "$TAG_NAME" miaospeed/miaospeed_linux_amd64 \
+            --title "Miaospeed Auto Build $TAG_NAME" \
+            --notes "自动化编译发布。对应的 BUILD TOKEN 请查看仓库主页的 README.md 文件。"
