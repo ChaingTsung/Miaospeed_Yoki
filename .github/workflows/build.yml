@@ -1,7 +1,6 @@
 name: Build and Release Miaospeed
 
 on:
-  # 1. 允许手动触发（带是否重置 TOKEN 的选项）
   workflow_dispatch:
     inputs:
       force_reset_token:
@@ -9,9 +8,8 @@ on:
         required: false
         type: boolean
         default: false
-  # 2. 增加定时自动触发
   schedule:
-    # 这里的 cron 表达式代表：每个月 1 号的 UTC 00:00（北京时间早上 8:00）自动执行一次
+    # 每个月 1 号的 UTC 00:00（北京时间早上 8:00）自动执行一次
     - cron: '0 0 1 * *'
 
 permissions:
@@ -70,18 +68,14 @@ jobs:
           
           mkdir -p ../build_artifacts
           
-          # 支持架构：普通VPS, ARM服务器/RK3588, 老32位ARM, 软路由MIPS, Windows, Mac
-          PLATFORMS="linux/amd64 linux/arm64 linux/arm linux/mipsle windows/amd64 windows/arm64 darwin/amd64 darwin/arm64"
+          # 仅保留支持底层网络调用的 Linux 架构
+          PLATFORMS="linux/amd64 linux/arm64 linux/arm linux/mipsle"
           
           for PLATFORM in $PLATFORMS; do
             GOOS=${PLATFORM%/*}
             GOARCH=${PLATFORM#*/}
             
             OUTPUT_NAME="miaospeed_${GOOS}_${GOARCH}"
-            
-            if [ "$GOOS" = "windows" ]; then
-              OUTPUT_NAME="${OUTPUT_NAME}.exe"
-            fi
             
             echo "正在编译 $OUTPUT_NAME ..."
             # 针对 32位 ARM，默认使用 GOARM=7 以获得最佳兼容性
@@ -105,8 +99,6 @@ jobs:
             - \`arm64\` (Rockchip RK3588/RK3568, 树莓派4/5, Oracle ARM等64位设备)
             - \`arm\` (老旧32位ARM设备或电视盒子)
             - \`mipsle\` (部分基于 OpenWrt 的路由器)
-          - **Windows**: \`amd64\`, \`arm64\`
-          - **macOS (Darwin)**: \`amd64\` (Intel), \`arm64\` (Apple Silicon)
 
           ## 编译信息
           - **构建时间**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -129,8 +121,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG_NAME="v$(date +'%Y%m%d%H%M%S')"
-          
-          # 一键打包并发布 build_artifacts 目录下的所有文件
           gh release create "$TAG_NAME" build_artifacts/* \
             --title "Miaospeed Auto Build $TAG_NAME" \
             --notes "自动化编译发布。支持多平台架构。对应的 BUILD TOKEN 请查看仓库主页的 README.md 文件。"
+
+      - name: Sync to Personal Website
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT }}
+          username: ${{ secrets.SERVER_USER }}
+          # 删除了 password，换成了直接调用密钥
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "build_artifacts/*"
+          target: "/var/www/github/files/"
+          strip_components: 1
