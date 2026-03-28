@@ -1,73 +1,31 @@
-name: Build and Release Miaospeed
-
-on:
-  workflow_dispatch:
-    # 增加一个手动运行时的交互选项
-    inputs:
-      force_reset_token:
-        description: '⚠️ 强制重新生成 TOKEN (选填：仅当您想换一个新 TOKEN 时才勾选此项)'
-        required: false
-        type: boolean
-        default: false
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '^1.21'
-
-      - name: Clone Miaospeed Repository
-        run: git clone https://github.com/AirportR/miaospeed.git
-
-      - name: Generate or Load TOKEN and Embedded Files
-        run: |
-          # 核心逻辑：判断是否勾选了强制重置，或者是否是第一次运行（BUILDTOKEN.txt 不存在）
-          if [ "${{ inputs.force_reset_token }}" == "true" ] || [ ! -f "BUILDTOKEN.txt" ]; then
-              echo "需要生成全新的 8 段式 TOKEN..."
-              FULL_TOKEN=""
-              for i in {1..8}; do
-                  PART=$(uuidgen | tr -d '-' | cut -c 1-16)
-                  if [ -z "$FULL_TOKEN" ]; then
-                      FULL_TOKEN="$PART"
-                  else
-                      FULL_TOKEN="${FULL_TOKEN}|${PART}"
-                  fi
-              done
-              # 将新 TOKEN 保存到当前仓库的主目录下
-              echo "$FULL_TOKEN" > BUILDTOKEN.txt
-          else
-              echo "检测到仓库中已有 BUILDTOKEN.txt，将继续使用现有 TOKEN..."
-          fi
-          
-          # 读取 TOKEN 并传递给环境变量
-          FULL_TOKEN=$(cat BUILDTOKEN.txt)
-          echo "BUILD_TOKEN=$FULL_TOKEN" >> $GITHUB_ENV
-          
-          # 将 TOKEN 放入 miaospeed 源码的编译目录中去打包
-          mkdir -p miaospeed/utils/embeded/
-          echo "$FULL_TOKEN" > miaospeed/utils/embeded/BUILDTOKEN.key
-
-          # ----------------- 生成 mTLS 证书 -----------------
-          cd miaospeed
-          mkdir -p preconfigs/embeded/miaokoCA/
-          openssl genrsa -out preconfigs/embeded/miaokoCA/miaoko.key 2048
-          openssl req -new -x509 -days 3650 -key preconfigs/embeded/miaokoCA/miaoko.key -out preconfigs/embeded/miaokoCA/miaoko.crt -subj "/C=CN/ST=State/L=City/O=Miaoko/OU=Dev/CN=miaospeed"
-          cp /etc/ssl/certs/ca-certificates.crt preconfigs/embeded/
-
-      - name: Build Miaospeed
+- name: Build Miaospeed for Multiple Platforms
         run: |
           cd miaospeed
           go mod download
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o miaospeed_linux_amd64 .
+          
+          mkdir -p ../build_artifacts
+          
+          # 增加了 linux/arm (32位ARM) 以及 linux/mipsle (常见软路由)
+          PLATFORMS="linux/amd64 linux/arm64 linux/arm linux/mipsle windows/amd64 windows/arm64 darwin/amd64 darwin/arm64"
+          
+          for PLATFORM in $PLATFORMS; do
+            GOOS=${PLATFORM%/*}
+            GOARCH=${PLATFORM#*/}
+            
+            OUTPUT_NAME="miaospeed_${GOOS}_${GOARCH}"
+            
+            if [ "$GOOS" = "windows" ]; then
+              OUTPUT_NAME="${OUTPUT_NAME}.exe"
+            fi
+            
+            echo "正在编译 $OUTPUT_NAME ..."
+            # 针对 32位 ARM，默认使用 GOARM=7 以获得最佳兼容性
+            if [ "$GOARCH" = "arm" ]; then
+              CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH GOARM=7 go build -ldflags "-s -w" -o ../build_artifacts/$OUTPUT_NAME .
+            else
+              CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -ldflags "-s -w" -o ../build_artifacts/$OUTPUT_NAME .
+            fi
+          done
 
       - name: Generate and Commit README.md and TOKEN
         run: |
@@ -76,9 +34,17 @@ jobs:
 
           这是由 GitHub Actions 自动化构建的 \`miaospeed\` 服务端程序。已内置所需的 mTLS 证书与验证配置。
 
+          ## 支持的平台架构
+          - **Linux (VPS / 开发板 / 软路由)**: 
+            - \`amd64\` (常规Intel/AMD服务器)
+            - \`arm64\` (Rockchip RK3588/RK3568, 树莓派4/5, Oracle ARM等64位设备)
+            - \`arm\` (老旧32位ARM设备或电视盒子)
+            - \`mipsle\` (部分基于 OpenWrt 的路由器)
+          - **Windows**: \`amd64\`, \`arm64\`
+          - **macOS (Darwin)**: \`amd64\` (Intel), \`arm64\` (Apple Silicon)
+
           ## 编译信息
           - **构建时间**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          - **系统架构**: Linux / amd64
           - **当前 BUILD TOKEN**: 
           \`\`\`text
           $BUILD_TOKEN
@@ -89,17 +55,6 @@ jobs:
           
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
-          # 关键步：把 README 和固定的 BUILDTOKEN.txt 一起提交到您的仓库里永久保存
           git add README.md BUILDTOKEN.txt
           git commit -m "docs: Auto-update README and TOKEN [skip ci]" || echo "No changes to commit"
           git push
-
-      - name: Create Release and Upload Asset
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG_NAME="v$(date +'%Y%m%d%H%M%S')"
-          gh release create "$TAG_NAME" miaospeed/miaospeed_linux_amd64 \
-            --title "Miaospeed Auto Build $TAG_NAME" \
-            --notes "自动化编译发布。对应的 BUILD TOKEN 请查看仓库主页的 README.md 文件。"
