@@ -1,6 +1,7 @@
 name: Build and Release Miaospeed
 
 on:
+  # 1. 允许手动触发（带是否重置 TOKEN 的选项）
   workflow_dispatch:
     inputs:
       force_reset_token:
@@ -8,6 +9,10 @@ on:
         required: false
         type: boolean
         default: false
+  # 2. 增加定时自动触发
+  schedule:
+    # 这里的 cron 表达式代表：每个月 1 号的 UTC 00:00（北京时间早上 8:00）自动执行一次
+    - cron: '0 0 1 * *'
 
 permissions:
   contents: write
